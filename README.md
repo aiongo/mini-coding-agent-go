@@ -10,6 +10,11 @@ with no LLM framework.**
 
 **English** | [简体中文](README.zh-CN.md)
 
+> **Two variants of the same agent.** This repo is the framework-free port — faithful to
+> the Python original down to the code structure and agent flow. Its sibling
+> **[mini-coding-agent-eino](https://github.com/aiongo/mini-coding-agent-eino)** rebuilds
+> the same agent on eino's ADK (`ChatModelAgent` + native tool-calling).
+
 This repo contains a small standalone coding agent:
 
 - code: a single `main` package (`mini_agent.go`, `tools.go`, `model.go`, ...)

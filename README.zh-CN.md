@@ -10,6 +10,11 @@
 
 [English](README.md) | **简体中文**
 
+> **同一 agent 的两个变体。**本仓库是无框架移植版——从代码结构到 agent 流程都忠于
+> Python 原版。其兄弟项目
+> **[mini-coding-agent-eino](https://github.com/aiongo/mini-coding-agent-eino)** 使用
+> eino 的 ADK 功能(`ChatModelAgent` + 原生 tool-calling)重建了同一个 agent。
+
 本仓库包含一个小型独立 coding agent:
 
 - 代码:单一 `main` 包(`mini_agent.go`、`tools.go`、`model.go` 等)
