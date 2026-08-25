@@ -1,0 +1,12 @@
+# build output
+mini-coding-agent-go
+mini-coding-agent-go.exe
+
+# runtime artifacts created in the workspace root
+.mini-coding-agent/
+agents.log
+
+# example walkthrough scratch repos (see EXAMPLE.md)
+tmp/
+
+.DS_Store
