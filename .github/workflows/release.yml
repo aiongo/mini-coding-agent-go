@@ -1,0 +1,54 @@
+name: Release
+
+# Build cross-platform binaries and attach them to the GitHub Release whenever a
+# version tag (v*) is pushed. Pure Go, no CGO — plain GOOS/GOARCH cross-compile.
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { goos: linux, goarch: amd64 }
+          - { goos: linux, goarch: arm64 }
+          - { goos: darwin, goarch: amd64 }
+          - { goos: darwin, goarch: arm64 }
+          - { goos: windows, goarch: amd64 }
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Build and package
+        env:
+          CGO_ENABLED: 0
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+        run: |
+          set -euo pipefail
+          ext=""
+          if [ "$GOOS" = "windows" ]; then ext=".exe"; fi
+          name="mini-coding-agent-go_${GITHUB_REF_NAME}_${GOOS}_${GOARCH}"
+          mkdir -p build
+          go build -trimpath -ldflags="-s -w" -o "build/${name}${ext}" .
+          cd build
+          if [ "$GOOS" = "windows" ]; then
+            zip "${name}.zip" "${name}${ext}"
+          else
+            tar czf "${name}.tar.gz" "${name}${ext}"
+          fi
+
+      - name: Attach to release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: build/*
