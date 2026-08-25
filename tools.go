@@ -23,10 +23,12 @@ type Tool struct {
 	Run         ToolFunc
 }
 
-// ToolFunc is the shape of a tool's run callback: takes the parsed args map, returns the
-// (to-be-clipped) text result or an error. Matches Python tool_* methods such as
-// tool_read_file(self, args) -> str, which raise on failure.
-type ToolFunc func(args map[string]any) (string, error)
+// ToolFunc is the shape of a tool's run callback: takes the caller's context and the parsed
+// args map, returns the (to-be-clipped) text result or an error. Matches Python tool_*
+// methods such as tool_read_file(self, args) -> str, which raise on failure. The Go-idiomatic
+// addition over Python is the context — it lets a REPL Ctrl-C interrupt an in-flight
+// run_shell/rg/delegate instead of waiting out their timeout.
+type ToolFunc func(ctx context.Context, args map[string]any) (string, error)
 
 // All filesystem access in the tool handlers goes through afero — specifically MiniAgent.Fs
 // (initialized to afero.NewOsFs in NewMiniAgent), never the os package directly. This keeps
@@ -129,7 +131,7 @@ func (a *MiniAgent) rel(resolved string) string {
 
 // toolListFiles mirrors Python tool_list_files (L742-754): list non-ignored entries in a
 // directory (dirs first, then by name), capped at 200, as "[D]/[F] <rel>" lines.
-func (a *MiniAgent) toolListFiles(args map[string]any) (string, error) {
+func (a *MiniAgent) toolListFiles(ctx context.Context, args map[string]any) (string, error) {
 	path, err := a.path(argString(args, "path", "."))
 	if err != nil {
 		return "", err
@@ -179,7 +181,7 @@ func (a *MiniAgent) toolListFiles(args map[string]any) (string, error) {
 // line states the "<n>:" prefixes are tool-added line numbers, not file content — weak
 // models otherwise mistake them for literal data (e.g. parsing a one-int-per-line file as
 // "index: value").
-func (a *MiniAgent) toolReadFile(args map[string]any) (string, error) {
+func (a *MiniAgent) toolReadFile(ctx context.Context, args map[string]any) (string, error) {
 	rawPath := argString(args, "path", "")
 	if rawPath == "" {
 		return "", fmt.Errorf("path is required")
@@ -196,6 +198,9 @@ func (a *MiniAgent) toolReadFile(args map[string]any) (string, error) {
 	end := argInt(args, "end", 200)
 	if start < 1 || end < start {
 		return "", fmt.Errorf("invalid line range")
+	}
+	if end-start+1 > MAX_READ_LINES {
+		return "", fmt.Errorf("invalid line range: at most %d lines per read", MAX_READ_LINES)
 	}
 	data, err := afero.ReadFile(a.Fs, path)
 	if err != nil {
@@ -216,7 +221,7 @@ func (a *MiniAgent) toolReadFile(args map[string]any) (string, error) {
 
 // toolSearch mirrors Python tool_search (L768-794): ripgrep if available, else a stdlib
 // substring fallback. Caps at 200 matches.
-func (a *MiniAgent) toolSearch(args map[string]any) (string, error) {
+func (a *MiniAgent) toolSearch(ctx context.Context, args map[string]any) (string, error) {
 	pattern := strings.TrimSpace(argString(args, "pattern", ""))
 	if pattern == "" {
 		return "", fmt.Errorf("pattern must not be empty")
@@ -228,7 +233,7 @@ func (a *MiniAgent) toolSearch(args map[string]any) (string, error) {
 	// Prefer ripgrep, falling back to the stdlib walker when rg isn't installed. No
 	// exec.LookPath pre-probe — RunProcess reports a missing binary as *CmdNotFoundError,
 	// which IsCmdNotFoundError detects.
-	res, runErr := RunProcess(context.Background(), "rg",
+	res, runErr := RunProcess(ctx, "rg",
 		[]string{"-n", "--smart-case", "--max-count", "200", pattern, path}, a.Root, 0)
 	if IsCmdNotFoundError(runErr) {
 		return a.searchFallback(path, pattern)
@@ -286,7 +291,7 @@ func (a *MiniAgent) searchFallback(root, pattern string) (string, error) {
 // toolRunShell mirrors Python tool_run_shell (L796-819): run a shell command in the repo
 // root with a bounded timeout, returning exit_code + stdout + stderr. Python uses
 // shell=True; RunProcess runs it as `sh -c <command>`.
-func (a *MiniAgent) toolRunShell(args map[string]any) (string, error) {
+func (a *MiniAgent) toolRunShell(ctx context.Context, args map[string]any) (string, error) {
 	command := strings.TrimSpace(argString(args, "command", ""))
 	if command == "" {
 		return "", fmt.Errorf("command must not be empty")
@@ -295,7 +300,7 @@ func (a *MiniAgent) toolRunShell(args map[string]any) (string, error) {
 	if timeout < 1 || timeout > 120 {
 		return "", fmt.Errorf("timeout must be in [1, 120]")
 	}
-	res, err := RunProcess(context.Background(), "sh", []string{"-c", command}, a.Root, timeout)
+	res, err := RunProcess(ctx, "sh", []string{"-c", command}, a.Root, timeout)
 	if err != nil {
 		return "", err
 	}
@@ -312,7 +317,7 @@ func (a *MiniAgent) toolRunShell(args map[string]any) (string, error) {
 
 // toolWriteFile mirrors Python tool_write_file (L821-826): create parent dirs and write a
 // UTF-8 text file, returning a "wrote <rel> (n chars)" confirmation.
-func (a *MiniAgent) toolWriteFile(args map[string]any) (string, error) {
+func (a *MiniAgent) toolWriteFile(ctx context.Context, args map[string]any) (string, error) {
 	rawPath := argString(args, "path", "")
 	if rawPath == "" {
 		return "", fmt.Errorf("path is required")
@@ -325,7 +330,13 @@ func (a *MiniAgent) toolWriteFile(args map[string]any) (string, error) {
 	if !ok {
 		return "", fmt.Errorf("missing content")
 	}
-	s, _ := content.(string)
+	s, ok := content.(string)
+	if !ok {
+		// Python path.write_text(args["content"]) raises TypeError on a non-str, which run_tool
+		// folds into "error: tool write_file failed: ...". Match that instead of silently
+		// writing an empty file (the comma-ok form would zero content to "").
+		return "", fmt.Errorf("content must be a string")
+	}
 	if err := a.Fs.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return "", err
 	}
@@ -337,7 +348,7 @@ func (a *MiniAgent) toolWriteFile(args map[string]any) (string, error) {
 
 // toolPatchFile mirrors Python tool_patch_file (L828-842): replace exactly one occurrence
 // of old_text with new_text in a file, rejecting if old_text is absent or non-unique.
-func (a *MiniAgent) toolPatchFile(args map[string]any) (string, error) {
+func (a *MiniAgent) toolPatchFile(ctx context.Context, args map[string]any) (string, error) {
 	rawPath := argString(args, "path", "")
 	if rawPath == "" {
 		return "", fmt.Errorf("path is required")
@@ -358,7 +369,10 @@ func (a *MiniAgent) toolPatchFile(args map[string]any) (string, error) {
 	if !ok {
 		return "", fmt.Errorf("missing new_text")
 	}
-	newText, _ := newValue.(string)
+	newText, ok := newValue.(string)
+	if !ok {
+		return "", fmt.Errorf("new_text must be a string")
+	}
 	data, err := afero.ReadFile(a.Fs, path)
 	if err != nil {
 		return "", err
@@ -381,7 +395,7 @@ func (a *MiniAgent) toolPatchFile(args map[string]any) (string, error) {
 // Python, where the child shares those objects instead of re-creating them. The child runs with
 // approval_policy="never", read_only=true, depth+1, and max_steps from the call (default 3); its
 // memory is seeded with the task and a clipped snapshot of the parent's transcript as notes.
-func (a *MiniAgent) toolDelegate(args map[string]any) (string, error) {
+func (a *MiniAgent) toolDelegate(ctx context.Context, args map[string]any) (string, error) {
 	if a.Depth >= a.MaxDepth {
 		return "", fmt.Errorf("delegate depth exceeded")
 	}
@@ -415,7 +429,9 @@ func (a *MiniAgent) toolDelegate(args map[string]any) (string, error) {
 	child.Session.Memory.Task = task
 	child.Session.Memory.Notes = []string{Clip(a.historyText(), 300)}
 
-	final, err := child.Ask(task)
+	// The child runs on the parent's ctx so a REPL Ctrl-C cancels the delegate's model calls
+	// too; it is still bounded by its own MaxSteps and the model call timeout.
+	final, err := child.Ask(ctx, task)
 	if err != nil {
 		return "", err
 	}
@@ -468,6 +484,9 @@ func (a *MiniAgent) validateTool(name string, args map[string]any) error {
 		end := argInt(args, "end", 200)
 		if start < 1 || end < start {
 			return fmt.Errorf("invalid line range")
+		}
+		if end-start+1 > MAX_READ_LINES {
+			return fmt.Errorf("invalid line range: at most %d lines per read", MAX_READ_LINES)
 		}
 	case "search":
 		pattern := strings.TrimSpace(argString(args, "pattern", ""))
@@ -613,7 +632,7 @@ func (a *MiniAgent) approve(name string, args map[string]any) bool {
 // path every tool call goes through. It NEVER returns an error — every failure (unknown tool,
 // invalid args, repeated call, denied approval, runtime crash) is folded into an "error: ..." string
 // that becomes the tool's transcript content, so the ask loop keeps looping and the model can react.
-func (a *MiniAgent) runTool(name string, args map[string]any) string {
+func (a *MiniAgent) runTool(ctx context.Context, name string, args map[string]any) string {
 	tool, ok := a.Tools[name]
 	if !ok {
 		return fmt.Sprintf("error: unknown tool '%s'", name)
@@ -631,7 +650,7 @@ func (a *MiniAgent) runTool(name string, args map[string]any) string {
 	if tool.Risky && !a.approve(name, args) {
 		return fmt.Sprintf("error: approval denied for %s", name)
 	}
-	result, err := tool.Run(args)
+	result, err := tool.Run(ctx, args)
 	if err != nil {
 		return fmt.Sprintf("error: tool %s failed: %s", name, err)
 	}

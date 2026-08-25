@@ -91,8 +91,16 @@ func readProjectDocs(repoRoot, cwd string) map[string]string {
 
 // resolvePath mirrors Python Path.resolve(): an absolute path with symlinks resolved.
 // It first expands a leading "~" (Go's os/path/filepath never do this on their own —
-// see expandHome), then makes it absolute and resolves symlinks. Falls back to the plain
-// absolute path if symlink resolution fails (e.g. the path is partly missing).
+// see expandHome), then makes it absolute and resolves symlinks.
+//
+// filepath.EvalSymlinks only succeeds when the WHOLE path exists, but Python's non-strict
+// resolve also substitutes the target of a dangling (not-yet-existing) symlink. Without
+// that, a symlink inside the workspace pointing at a missing outside path keeps its
+// in-workspace lexical form here, passes pathIsWithinRoot, and write_file's
+// O_CREATE (afero.WriteFile) follows it outside the root — a sandbox escape. So on
+// EvalSymlinks failure, resolve the deepest existing ancestor, then walk the remaining
+// components following symlinks (dangling targets included; bounded, to survive cycles).
+// os.Lstat/os.Readlink are the same afero-has-no-equivalent exception as os.SameFile.
 func resolvePath(p string) string {
 	p = expandHome(p)
 	abs, err := filepath.Abs(p)
@@ -102,7 +110,32 @@ func resolvePath(p string) string {
 	if resolved, err := filepath.EvalSymlinks(abs); err == nil {
 		return resolved
 	}
-	return abs
+	// Missing tail: resolve the parent recursively, then follow the remaining links.
+	dir, file := filepath.Split(abs)
+	cur := resolvePath(filepath.Clean(dir))
+	for comp := range strings.SplitSeq(file, "/") {
+		if comp == "" {
+			continue
+		}
+		next := filepath.Join(cur, comp)
+		for range 40 { // follow symlink chains, bounded against cycles
+			info, err := os.Lstat(next)
+			if err != nil || info.Mode()&os.ModeSymlink == 0 {
+				break
+			}
+			target, err := os.Readlink(next)
+			if err != nil {
+				break
+			}
+			if filepath.IsAbs(target) {
+				next = filepath.Clean(target)
+			} else {
+				next = filepath.Join(filepath.Dir(next), target)
+			}
+		}
+		cur = next
+	}
+	return cur
 }
 
 // expandHome replaces a leading "~" or "~/" with the current user's home directory,
@@ -128,7 +161,9 @@ func expandHome(p string) string {
 // back on a non-zero exit, an error, or an empty result (Python: subprocess.run with
 // check=True, then `result.stdout.strip() or fallback`).
 func (ctx *WorkspaceContext) git(args []string, fallback string) (string, error) {
-	cmdResult, err := RunProcess(context.Background(), "git", args, ctx.Cwd, 0)
+	// Bound startup git calls (10s) so a hung git binary can't block agent construction
+	// forever. RunProcess applies timeoutSecs via context.WithTimeout internally.
+	cmdResult, err := RunProcess(context.Background(), "git", args, ctx.Cwd, 10)
 
 	if cmdResult.ExitCode != 0 || err != nil {
 		return fallback, nil

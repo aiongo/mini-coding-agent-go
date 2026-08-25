@@ -6,7 +6,6 @@ import (
 	"os"
 	"slices"
 	"strings"
-	"sync/atomic"
 
 	"github.com/urfave/cli/v3"
 )
@@ -15,11 +14,6 @@ import (
 // all flags attached) plus the prompt subcommand for one-shot invocations.
 type Cli struct {
 	cmd *cli.Command
-
-	// ran is set when a real command action executed (vs. help/version/no-op).
-	// Currently write-only: reserved for a caller that needs to know whether the
-	// invocation actually did work.
-	ran atomic.Bool
 }
 
 // NewCli builds the Cli and initializes its command tree; call Run to execute it.
@@ -52,7 +46,7 @@ func (c *Cli) init() {
 		Version: "1.0",
 		// Root action = interactive REPL (Python main's no-prompt branch). The one-shot path
 		// is the `prompt` subcommand below; both ultimately call agent.Ask.
-		Action: c.ranAction(c.handleInteract),
+		Action: c.handleInteract,
 		// Flags live on the root command so BOTH entry points share them: the root
 		// action (Serve/REPL) reads them directly, and the `prompt` subcommand inherits
 		// them via urfave/cli v3 persistent-flag propagation — lookupFlag walks Lineage()
@@ -131,7 +125,7 @@ func (c *Cli) init() {
 				Name:    "prompt",
 				Aliases: []string{"p"},
 				Usage:   "One-shot prompt to send to the model.(Interactive Mode to input *)",
-				Action:  c.ranAction(c.handleServe),
+				Action:  c.handleServe,
 				// Surface arg/usage errors (e.g. missing prompt) the same way
 				// urfave surfaces missing required flags: error + help, nonzero exit.
 				OnUsageError: c.onUsageError,
@@ -151,13 +145,6 @@ func (c *Cli) init() {
 	}
 }
 
-func (c *Cli) ranAction(action cli.ActionFunc) cli.ActionFunc {
-	return func(ctx context.Context, cmd *cli.Command) error {
-		c.ran.Store(true)
-		return action(ctx, cmd)
-	}
-}
-
 func (c *Cli) handleServe(ctx context.Context, cmd *cli.Command) error {
 	agent := NewMiniAgent(miniAgentOptionsFromFlags(cmd)...)
 	fmt.Println(agent.buildWelcome())
@@ -170,7 +157,7 @@ func (c *Cli) handleServe(ctx context.Context, cmd *cli.Command) error {
 		userMessage = "*"
 	}
 	fmt.Println()
-	final, err := agent.Ask(userMessage)
+	final, err := agent.Ask(ctx, userMessage)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		return err
@@ -216,7 +203,7 @@ func (c *Cli) handleInteract(ctx context.Context, cmd *cli.Command) error {
 			continue
 		}
 		fmt.Println()
-		final, err := agent.Ask(input)
+		final, err := agent.Ask(ctx, input)
 		if err != nil {
 			fmt.Fprintln(os.Stderr, err)
 			continue

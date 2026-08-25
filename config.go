@@ -2,17 +2,19 @@ package main
 
 import "strings"
 
+// Integer limits — const (never mutated), kept out of the var block so they can't be
+// reassigned. Mirrors the eino variant's MAX_TOOL_OUTPUT const.
+const (
+	MAX_TOOL_OUTPUT = 4000
+	MAX_HISTORY     = 12000
+	// MAX_READ_LINES caps the read_file [start,end] window: without it an end=100000
+	// request loads the whole file just for runTool to clip the output back to
+	// MAX_TOOL_OUTPUT chars afterwards (mirrors the eino variant's maxReadLines).
+	MAX_READ_LINES = 2000
+)
+
 var (
-	DOC_NAMES   = []string{"AGENTS.md", "README.md", "pyproject.toml", "package.json"}
-	HELP_TEXT   = "/help, /memory, /session, /reset, /exit"
-	WELCOME_ART = []string{
-		"/\\     /\\\\",
-		"{  `---'  }",
-		"{  O   O  }",
-		"~~>  V  <~~",
-		"\\\\  \\|/  /",
-		"`-----'__",
-	}
+	DOC_NAMES = []string{"AGENTS.md", "README.md", "pyproject.toml", "package.json"}
 	HELP_DETAILS = strings.Join([]string{
 
 		"Commands:",
@@ -23,8 +25,6 @@ var (
 		"/exit    Exit the agent.",
 	}, "\n")
 
-	MAX_TOOL_OUTPUT    = 4000
-	MAX_HISTORY        = 12000
 	IGNORED_PATH_NAMES = []string{".git", ".mini-coding-agent", "__pycache__", ".pytest_cache", ".ruff_cache", ".venv", "venv"}
 
 	// Ask-loop stop messages (mini_coding_agent.py L486-492): emitted when the loop exits

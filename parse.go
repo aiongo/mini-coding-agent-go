@@ -28,9 +28,16 @@ type ParseResult struct {
 func Parse(raw string) ParseResult {
 	if strings.Contains(raw, "<tool>") && toolBeforeFinal(raw, "<tool>") {
 		body := extract(raw, "tool")
-		var payload map[string]any
-		if err := json.Unmarshal([]byte(body), &payload); err != nil {
+		// Decode into any first so a valid-but-non-object body (e.g. `[1,2]` or `"x"`) can be
+		// distinguished from malformed JSON — matching Python's "tool payload must be a JSON
+		// object" branch. json.Unmarshal straight into map[string]any would conflate the two.
+		var generic any
+		if err := json.Unmarshal([]byte(body), &generic); err != nil {
 			return ParseResult{Kind: "retry", Notice: retryNotice("model returned malformed tool JSON")}
+		}
+		payload, ok := generic.(map[string]any)
+		if !ok {
+			return ParseResult{Kind: "retry", Notice: retryNotice("tool payload must be a JSON object")}
 		}
 		name, _ := payload["name"].(string)
 		if strings.TrimSpace(name) == "" {

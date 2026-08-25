@@ -3,7 +3,7 @@ package main
 import (
 	"encoding/json"
 	"path/filepath"
-	"sort"
+	"slices"
 	"strings"
 	"time"
 
@@ -68,8 +68,8 @@ func (s *SessionStore) Latest() (string, error) {
 	if len(matches) == 0 {
 		return "", nil
 	}
-	sort.Slice(matches, func(i, j int) bool {
-		return s.modTime(matches[i]).Before(s.modTime(matches[j]))
+	slices.SortFunc(matches, func(a, b string) int {
+		return s.modTime(a).Compare(s.modTime(b))
 	})
 	last := matches[len(matches)-1]
 	return strings.TrimSuffix(filepath.Base(last), ".json"), nil

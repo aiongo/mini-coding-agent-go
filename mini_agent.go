@@ -46,11 +46,9 @@ type MiniAgent struct {
 	Session        *Session          // session
 
 	// Derived in Python __init__ from build_tools()/build_prefix()/session_store.save().
-	// Their builders belong to components #2/#3/#5 and are not yet ported, so they are
-	// left at their zero values here.
-	Tools       map[string]*Tool // TODO(component #3): a.Tools = a.buildTools()
-	Prefix      string           // TODO(component #2): a.Prefix = a.buildPrefix()
-	SessionPath string           // TODO(component #5): a.SessionPath = a.SessionStore.Save(a.Session)
+	Tools       map[string]*Tool
+	Prefix      string
+	SessionPath string
 }
 
 // NewMiniAgent constructs a MiniAgent from the session store plus options, applying the
@@ -83,10 +81,44 @@ func NewMiniAgent(opts ...MiniAgentOption) *MiniAgent {
 	if a.Session == nil {
 		a.Session = newSession(a.Root)
 	}
+	// --resume resolves into the session here (Python build_agent's resume branch): "latest"
+	// maps to the newest session file, any other value is a concrete id. A failure (bad id,
+	// unreadable file) keeps the fresh session and logs a warning rather than crashing, so a
+	// typo on --resume doesn't abort the whole agent. WithSession still wins when Resume is "".
+	a.resolveResume()
 	a.Tools = a.buildTools()
 	a.Prefix = a.buildPrefix()
-	// TODO(component #5): a.SessionPath = a.SessionStore.Save(a.Session)
+	// Persist the fresh/resumed session up front so SessionPath is set before the first Ask
+	// (/session shows a path immediately) and a resumed session is re-saved under its id.
+	a.SessionPath, _ = a.SessionStore.Save(a.Session)
 	return a
+}
+
+// resolveResume consumes a.Resume: "latest" resolves to the newest session via
+// SessionStore.Latest, any other non-empty value is a concrete session id. On success the
+// loaded session replaces the fresh one and SessionPath is set to its file. On failure the
+// fresh session is kept and a warning is logged — mirroring the intent of Python's resume
+// path without making agent construction fail on a bad id.
+func (a *MiniAgent) resolveResume() {
+	if a.Resume == "" {
+		return
+	}
+	id := a.Resume
+	if id == "latest" {
+		latest, err := a.SessionStore.Latest()
+		if err != nil || latest == "" {
+			a.Logger.Warn("resume: no latest session found", "err", err)
+			return
+		}
+		id = latest
+	}
+	session, err := a.SessionStore.Load(id)
+	if err != nil {
+		a.Logger.Warn("resume: failed to load session, starting fresh", "id", id, "err", err)
+		return
+	}
+	a.Session = session
+	a.SessionPath = a.SessionStore.path(id)
 }
 
 // Remember appends item to bucket (an empty item is a no-op), moves an existing entry to
@@ -106,33 +138,6 @@ func Remember(bucket []string, item string, limit int) []string {
 	bucket = append(bucket, item)
 
 	return bucket[len(bucket)-min(limit, len(bucket)):]
-}
-
-// NewMiniAgentFromSession mirrors Python MiniAgent.from_session (mini_coding_agent.py
-// L260-268): load the session identified by sessionID from the store and construct the
-// agent with it (instead of creating a fresh one). The model client and workspace are
-// synthesized from the flag-derived config in opts, exactly as in NewMiniAgent.
-//
-// sessionID is a concrete session id, not "latest" — resolving "latest" to an id via
-// SessionStore.Latest is the caller's job, mirroring Python build_agent.
-func NewMiniAgentFromSession(sessionID string, opts ...MiniAgentOption) (*MiniAgent, error) {
-	// session, err := store.Load(sessionID)
-	// if err != nil {
-	// 	return nil, err
-	// }
-	// all := make([]MiniAgentOption, 0, len(opts)+1)
-	// all = append(all, opts...)
-	// all = append(all, WithSession(session))
-	// return NewMiniAgent(store, all...), nil
-	a := NewMiniAgent(opts...)
-	session, err := a.SessionStore.Load(sessionID)
-	if err != nil {
-		return nil, err
-	}
-
-	a.Session = session
-
-	return a, nil
 }
 
 // toolOrder fixes the order the Tools block is rendered in buildPrefix. It mirrors Python
@@ -266,12 +271,6 @@ func (a *MiniAgent) buildTools() map[string]*Tool {
 	return tools
 }
 
-func (a *MiniAgent) Serve() error {
-	fmt.Println(a.buildWelcome())
-	// a.Logger.Info("start")s
-	return nil
-}
-
 // Ask mirrors Python MiniAgent.ask (mini_coding_agent.py L444-494): the atomic per-request
 // handler both CLI modes call. It records the user message, then loops model -> parse -> act:
 // a "tool" result runs through runTool and is appended to the transcript; a "retry" feeds the
@@ -279,7 +278,7 @@ func (a *MiniAgent) Serve() error {
 // is bounded by MaxSteps (tool turns) and maxAttempts (total model calls); exiting without a
 // final yields one of the STOP_* messages. Returns (final, error): the final answer text (always
 // non-empty) plus any hard error (record/Complete failure), which the CLI prints to stderr.
-func (a *MiniAgent) Ask(message string) (string, error) {
+func (a *MiniAgent) Ask(ctx context.Context, message string) (string, error) {
 	memory := &a.Session.Memory
 	if memory.Task == "" {
 		memory.Task = Clip(strings.TrimSpace(message), 300)
@@ -293,7 +292,7 @@ func (a *MiniAgent) Ask(message string) (string, error) {
 	maxAttempts := max(a.MaxSteps*3, a.MaxSteps+4)
 	for toolSteps < a.MaxSteps && attempts < maxAttempts {
 		attempts++
-		raw, err := a.ModelClient.Complete(context.Background(), a.prompt(message), a.MaxNewTokens)
+		raw, err := a.ModelClient.Complete(ctx, a.prompt(message), a.MaxNewTokens)
 		if err != nil {
 			return "", err
 		}
@@ -305,7 +304,7 @@ func (a *MiniAgent) Ask(message string) (string, error) {
 			if args == nil {
 				args = map[string]any{}
 			}
-			result := a.runTool(name, args)
+			result := a.runTool(ctx, name, args)
 			if err := a.record(HistoryItem{
 				Role: "tool", Name: name, Args: args, Content: result, CreatedAt: Now(),
 			}); err != nil {
